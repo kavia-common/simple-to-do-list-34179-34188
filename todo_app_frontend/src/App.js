@@ -5,6 +5,7 @@ import './App.css';
  * Retro-themed, single-column Todo app with localStorage persistence.
  * Features: add, edit inline, toggle complete, delete, clear completed, filter (All/Active/Completed).
  * Accessibility: labeled controls, aria attributes, keyboard-friendly, focus management for editing.
+ * Now includes drag-and-drop reordering (mouse + keyboard) with persistence.
  */
 
 // Utils
@@ -36,6 +37,17 @@ function saveTodos(todos) {
   }
 }
 
+/**
+ * Move an item inside an array from one index to another.
+ * Returns a new array instance.
+ */
+function arrayMove(arr, from, to) {
+  const copy = arr.slice();
+  const [spliced] = copy.splice(from, 1);
+  copy.splice(to, 0, spliced);
+  return copy;
+}
+
 // PUBLIC_INTERFACE
 export default function App() {
   /** App theme and basic retro palette colors per style guide */
@@ -47,6 +59,11 @@ export default function App() {
   const editInputRef = useRef(null);
   const [editingId, setEditingId] = useState(null);
   const [editingText, setEditingText] = useState('');
+
+  // Drag state
+  const [dragId, setDragId] = useState(null);
+  const [dragOverId, setDragOverId] = useState(null);
+  const lastFocusedIdRef = useRef(null); // preserve focus after drop
 
   // Apply theme attribute for potential future theming hooks
   useEffect(() => {
@@ -148,6 +165,86 @@ export default function App() {
     }
   }
 
+  // Drag & Drop Handlers (HTML5 DnD)
+  function onDragStart(e, id) {
+    setDragId(id);
+    lastFocusedIdRef.current = id;
+    e.dataTransfer.effectAllowed = 'move';
+    // Needed for Firefox to initiate drag
+    e.dataTransfer.setData('text/plain', id);
+  }
+
+  function onDragOver(e, id) {
+    e.preventDefault(); // allow drop
+    if (id !== dragOverId) setDragOverId(id);
+    e.dataTransfer.dropEffect = 'move';
+  }
+
+  function onDragLeave(e, id) {
+    // Remove hover when leaving element
+    if (dragOverId === id) setDragOverId(null);
+  }
+
+  function onDrop(e, id) {
+    e.preventDefault();
+    const sourceId = dragId || e.dataTransfer.getData('text/plain');
+    const targetId = id;
+    if (!sourceId || !targetId || sourceId === targetId) {
+      cleanupDnD();
+      return;
+    }
+    const fromIndex = todos.findIndex(t => t.id === sourceId);
+    const toIndex = todos.findIndex(t => t.id === targetId);
+    if (fromIndex === -1 || toIndex === -1) {
+      cleanupDnD();
+      return;
+    }
+    setTodos(prev => arrayMove(prev, fromIndex, toIndex));
+    // After re-render, move focus back to dragged item’s handle for accessibility
+    setTimeout(() => {
+      const el = document.querySelector(`[data-todo-id="${sourceId}"] .drag-handle`);
+      el?.focus();
+    }, 0);
+    cleanupDnD();
+  }
+
+  function onDragEnd() {
+    cleanupDnD();
+  }
+
+  function cleanupDnD() {
+    setDragId(null);
+    setDragOverId(null);
+  }
+
+  // Keyboard reordering via ArrowUp/ArrowDown with Ctrl/Cmd+Shift+Arrow as an alternative
+  // PUBLIC_INTERFACE
+  function onItemKeyDown(e, id) {
+    const index = todos.findIndex(t => t.id === id);
+    if (index === -1) return;
+    const isArrowUp = e.key === 'ArrowUp';
+    const isArrowDown = e.key === 'ArrowDown';
+    const moveUp = isArrowUp;
+    const moveDown = isArrowDown;
+    const withMod = e.ctrlKey || e.metaKey || e.shiftKey;
+    if ((moveUp || moveDown) && withMod) {
+      e.preventDefault();
+      if (moveUp && index > 0) {
+        setTodos(prev => arrayMove(prev, index, index - 1));
+        requestAnimationFrame(() => {
+          const el = document.querySelector(`[data-todo-id="${id}"] .drag-handle`);
+          el?.focus();
+        });
+      } else if (moveDown && index < todos.length - 1) {
+        setTodos(prev => arrayMove(prev, index, index + 1));
+        requestAnimationFrame(() => {
+          const el = document.querySelector(`[data-todo-id="${id}"] .drag-handle`);
+          el?.focus();
+        });
+      }
+    }
+  }
+
   // Accessible counts
   const completedCount = todos.length - remainingCount;
 
@@ -234,76 +331,115 @@ export default function App() {
               No tasks to show.
             </p>
           ) : (
-            <ul className="todo-list">
-              {filtered.map(todo => (
-                <li className={`todo-item ${todo.completed ? 'completed' : ''}`} key={todo.id}>
-                  <div className="left">
-                    <input
-                      id={`toggle-${todo.id}`}
-                      type="checkbox"
-                      checked={!!todo.completed}
-                      onChange={() => toggleComplete(todo.id)}
-                      aria-label={`Mark "${todo.text}" ${todo.completed ? 'as active' : 'as completed'}`}
-                      className="retro-checkbox"
-                    />
-                  </div>
-
-                  <div className="center">
-                    {editingId === todo.id ? (
+            // Provide listbox semantics for accessibility reordering hints
+            <ul className="todo-list" role="listbox" aria-label="Todos (drag to reorder; Ctrl/Cmd+Shift+Arrow to reorder with keyboard)">
+              {filtered.map(todo => {
+                // Index within full list to compute draggable ordering
+                const isBeingDragged = dragId === todo.id;
+                const isDragOver = dragOverId === todo.id;
+                return (
+                  <li
+                    key={todo.id}
+                    className={`todo-item ${todo.completed ? 'completed' : ''} ${isBeingDragged ? 'dragging' : ''} ${isDragOver ? 'drag-over' : ''}`}
+                    data-todo-id={todo.id}
+                    role="option"
+                    aria-selected={false}
+                    draggable
+                    aria-grabbed={isBeingDragged}
+                    onDragStart={e => onDragStart(e, todo.id)}
+                    onDragOver={e => onDragOver(e, todo.id)}
+                    onDragLeave={e => onDragLeave(e, todo.id)}
+                    onDrop={e => onDrop(e, todo.id)}
+                    onDragEnd={onDragEnd}
+                    onKeyDown={e => onItemKeyDown(e, todo.id)}
+                    tabIndex={0}
+                    aria-label={`${todo.text}. Drag to reorder, or use Ctrl/Cmd+Shift plus arrow keys.`}
+                  >
+                    <div className="left">
                       <input
-                        ref={editInputRef}
-                        type="text"
-                        className="retro-input edit-input"
-                        value={editingText}
-                        onChange={e => setEditingText(e.target.value)}
-                        onBlur={submitEdit}
-                        onKeyDown={onEditKeyDown}
-                        aria-label={`Edit task: ${todo.text}`}
+                        id={`toggle-${todo.id}`}
+                        type="checkbox"
+                        checked={!!todo.completed}
+                        onChange={() => toggleComplete(todo.id)}
+                        aria-label={`Mark "${todo.text}" ${todo.completed ? 'as active' : 'as completed'}`}
+                        className="retro-checkbox"
                       />
-                    ) : (
-                      <label
-                        htmlFor={`toggle-${todo.id}`}
-                        className="todo-text"
-                        onDoubleClick={() => beginEdit(todo.id)}
-                      >
-                        {todo.text}
-                      </label>
-                    )}
-                  </div>
+                    </div>
 
-                  <div className="right">
-                    {editingId === todo.id ? (
-                      <button
-                        className="retro-btn small"
-                        onMouseDown={e => e.preventDefault()}
-                        onClick={submitEdit}
-                        aria-label="Save edit"
-                        title="Save"
-                      >
-                        Save
-                      </button>
-                    ) : (
-                      <button
-                        className="retro-btn small"
-                        onClick={() => beginEdit(todo.id)}
-                        aria-label={`Edit ${todo.text}`}
-                        title="Edit"
-                      >
-                        Edit
-                      </button>
-                    )}
+                    <div className="center">
+                      {editingId === todo.id ? (
+                        <input
+                          ref={editInputRef}
+                          type="text"
+                          className="retro-input edit-input"
+                          value={editingText}
+                          onChange={e => setEditingText(e.target.value)}
+                          onBlur={submitEdit}
+                          onKeyDown={onEditKeyDown}
+                          aria-label={`Edit task: ${todo.text}`}
+                        />
+                      ) : (
+                        <label
+                          htmlFor={`toggle-${todo.id}`}
+                          className="todo-text"
+                          onDoubleClick={() => beginEdit(todo.id)}
+                        >
+                          {todo.text}
+                        </label>
+                      )}
+                    </div>
 
-                    <button
-                      className="retro-btn small danger"
-                      onClick={() => deleteTodo(todo.id)}
-                      aria-label={`Delete ${todo.text}`}
-                      title="Delete"
-                    >
-                      Delete
-                    </button>
-                  </div>
-                </li>
-              ))}
+                    <div className="right">
+                      {/* Drag handle doubles as focus target for keyboard DnD */}
+                      <button
+                        className="retro-btn small drag-handle"
+                        type="button"
+                        aria-label={`Reorder ${todo.text}. Drag or use Ctrl/Cmd+Shift+Arrow keys`}
+                        title="Drag to reorder"
+                        // Allow dragging from the handle as well
+                        draggable
+                        onDragStart={e => onDragStart(e, todo.id)}
+                        onDragOver={e => onDragOver(e, todo.id)}
+                        onDrop={e => onDrop(e, todo.id)}
+                        onDragEnd={onDragEnd}
+                        onKeyDown={e => onItemKeyDown(e, todo.id)}
+                      >
+                        ⋮⋮
+                      </button>
+
+                      {editingId === todo.id ? (
+                        <button
+                          className="retro-btn small"
+                          onMouseDown={e => e.preventDefault()}
+                          onClick={submitEdit}
+                          aria-label="Save edit"
+                          title="Save"
+                        >
+                          Save
+                        </button>
+                      ) : (
+                        <button
+                          className="retro-btn small"
+                          onClick={() => beginEdit(todo.id)}
+                          aria-label={`Edit ${todo.text}`}
+                          title="Edit"
+                        >
+                          Edit
+                        </button>
+                      )}
+
+                      <button
+                        className="retro-btn small danger"
+                        onClick={() => deleteTodo(todo.id)}
+                        aria-label={`Delete ${todo.text}`}
+                        title="Delete"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </section>
